@@ -7,6 +7,7 @@
 #include <algorithm>  // For min
 #include <cmath>      // For isnan.
 #include <limits>
+#include <sstream>
 #include <string>
 #include <utility>  // For move
 #include <vector>
@@ -107,7 +108,6 @@
 #include "src/profiler/heap-snapshot-generator-inl.h"
 #include "src/profiler/profile-generator-inl.h"
 #include "src/profiler/tick-sample.h"
-#include "src/regexp/regexp-stack.h"
 #include "src/regexp/regexp-utils.h"
 #include "src/runtime/runtime.h"
 #include "src/snapshot/code-serializer.h"
@@ -120,6 +120,7 @@
 #include "src/tracing/trace-event.h"
 #include "src/utils/detachable-vector.h"
 #include "src/utils/version.h"
+#include "src/web-snapshot/web-snapshot.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/trap-handler/trap-handler.h"
@@ -382,11 +383,11 @@ void V8::SetSnapshotDataBlob(StartupData* snapshot_blob) {
 
 namespace {
 
-#ifdef V8_VIRTUAL_MEMORY_CAGE
-// ArrayBufferAllocator to use when the virtual memory cage is enabled, in which
-// case all ArrayBuffer backing stores need to be allocated inside the data
-// cage. Note, the current implementation is extremely inefficient as it uses
-// the BoundedPageAllocator. In the future, we'll need a proper allocator
+#ifdef V8_HEAP_SANDBOX
+// ArrayBufferAllocator to use when the heap sandbox is enabled, in which case
+// all ArrayBuffer backing stores need to be allocated inside the virtual
+// memory cage. Note, the current implementation is extremely inefficient as it
+// uses the BoundedPageAllocator. In the future, we'll need a proper allocator
 // implementation.
 class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
  public:
@@ -407,7 +408,7 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
   }
 
  private:
-  PageAllocator* page_allocator_ = internal::GetPlatformDataCagePageAllocator();
+  PageAllocator* page_allocator_ = internal::GetArrayBufferPageAllocator();
   const size_t page_size_ = page_allocator_->AllocatePageSize();
 };
 
@@ -454,7 +455,7 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
     return new_data;
   }
 };
-#endif  // V8_VIRTUAL_MEMORY_CAGE
+#endif  // V8_HEAP_SANDBOX
 
 struct SnapshotCreatorData {
   explicit SnapshotCreatorData(Isolate* isolate)
@@ -947,7 +948,7 @@ void HandleScope::Initialize(Isolate* isolate) {
   // We make an exception if the serializer is enabled, which means that the
   // Isolate is exclusively used to create a snapshot.
   Utils::ApiCheck(
-      !v8::Locker::IsActive() ||
+      !v8::Locker::WasEverUsed() ||
           internal_isolate->thread_manager()->IsLockedByCurrentThread() ||
           internal_isolate->serializer_enabled(),
       "HandleScope::HandleScope",
@@ -1962,10 +1963,6 @@ ScriptCompiler::CachedData::~CachedData() {
   }
 }
 
-bool ScriptCompiler::ExternalSourceStream::SetBookmark() { return false; }
-
-void ScriptCompiler::ExternalSourceStream::ResetToBookmark() { UNREACHABLE(); }
-
 ScriptCompiler::StreamedSource::StreamedSource(
     std::unique_ptr<ExternalSourceStream> stream, Encoding encoding)
     : impl_(new i::ScriptStreamingData(std::move(stream), encoding)) {}
@@ -2048,7 +2045,8 @@ Local<Value> UnboundScript::GetSourceMappingURL() {
 }
 
 MaybeLocal<Value> Script::Run(Local<Context> context) {
-  auto isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());
+  auto v8_isolate = context->GetIsolate();
+  auto isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   TRACE_EVENT_CALL_STATS_SCOPED(isolate, "v8", "V8.Execute");
   ENTER_V8(isolate, context, Script, Run, MaybeLocal<Value>(),
            InternalEscapableScope);
@@ -2078,6 +2076,19 @@ MaybeLocal<Value> Script::Run(Local<Context> context) {
     }
   }
 
+  if (V8_UNLIKELY(i::FLAG_experimental_web_snapshots)) {
+    i::Handle<i::HeapObject> maybe_script =
+        handle(fun->shared().script(), isolate);
+    if (maybe_script->IsScript() &&
+        i::Script::cast(*maybe_script).type() == i::Script::TYPE_WEB_SNAPSHOT) {
+      i::WebSnapshotDeserializer deserializer(v8_isolate);
+      deserializer.UseWebSnapshot(i::Handle<i::Script>::cast(maybe_script));
+      RETURN_ON_FAILED_EXECUTION(Value);
+      Local<Value> result = v8::Undefined(v8_isolate);
+      RETURN_ESCAPED(result);
+    }
+  }
+
   i::Handle<i::Object> receiver = isolate->global_proxy();
   Local<Value> result;
   has_pending_exception = !ToLocal<Value>(
@@ -2097,16 +2108,16 @@ MaybeLocal<Value> Script::Run(Local<Context> context) {
 }
 
 Local<Value> ScriptOrModule::GetResourceName() {
-  i::Handle<i::Script> obj = Utils::OpenHandle(this);
-  i::Isolate* isolate = obj->GetIsolate();
+  i::Handle<i::ScriptOrModule> obj = Utils::OpenHandle(this);
+  i::Isolate* isolate = i::GetIsolateFromWritableObject(*obj);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
-  i::Handle<i::Object> val(obj->name(), isolate);
+  i::Handle<i::Object> val(obj->resource_name(), isolate);
   return ToApiHandle<Value>(val);
 }
 
 Local<PrimitiveArray> ScriptOrModule::GetHostDefinedOptions() {
-  i::Handle<i::Script> obj = Utils::OpenHandle(this);
-  i::Isolate* isolate = obj->GetIsolate();
+  i::Handle<i::ScriptOrModule> obj = Utils::OpenHandle(this);
+  i::Isolate* isolate = i::GetIsolateFromWritableObject(*obj);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
   i::Handle<i::FixedArray> val(obj->host_defined_options(), isolate);
   return ToApiHandle<PrimitiveArray>(val);
@@ -2533,7 +2544,7 @@ MaybeLocal<Script> ScriptCompiler::Compile(Local<Context> context,
       !source->GetResourceOptions().IsModule(), "v8::ScriptCompiler::Compile",
       "v8::ScriptCompiler::CompileModule must be used to compile modules");
   auto isolate = context->GetIsolate();
-  auto maybe =
+  MaybeLocal<UnboundScript> maybe =
       CompileUnboundInternal(isolate, source, options, no_cache_reason);
   Local<UnboundScript> result;
   if (!maybe.ToLocal(&result)) return MaybeLocal<Script>();
@@ -2550,11 +2561,10 @@ MaybeLocal<Module> ScriptCompiler::CompileModule(
   Utils::ApiCheck(source->GetResourceOptions().IsModule(),
                   "v8::ScriptCompiler::CompileModule",
                   "Invalid ScriptOrigin: is_module must be true");
-  auto maybe =
+  MaybeLocal<UnboundScript> maybe =
       CompileUnboundInternal(isolate, source, options, no_cache_reason);
   Local<UnboundScript> unbound;
   if (!maybe.ToLocal(&unbound)) return MaybeLocal<Module>();
-
   i::Handle<i::SharedFunctionInfo> shared = Utils::OpenHandle(*unbound);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   return ToApiHandle<Module>(i_isolate->factory()->NewSourceTextModule(shared));
@@ -2651,16 +2661,26 @@ MaybeLocal<Function> ScriptCompiler::CompileFunctionInContext(
     RETURN_ON_FAILED_EXECUTION(Function);
     result = handle_scope.Escape(Utils::CallableToLocal(scoped_result));
   }
-
+  // TODO(cbruni): remove script_or_module_out paramater
   if (script_or_module_out != nullptr) {
     i::Handle<i::JSFunction> function =
         i::Handle<i::JSFunction>::cast(Utils::OpenHandle(*result));
     i::Isolate* isolate = function->GetIsolate();
     i::Handle<i::SharedFunctionInfo> shared(function->shared(), isolate);
     i::Handle<i::Script> script(i::Script::cast(shared->script()), isolate);
-    *script_or_module_out = v8::Utils::ScriptOrModuleToLocal(script);
+    // TODO(cbruni, v8:12302): Avoid creating tempory ScriptOrModule objects.
+    auto script_or_module = i::Handle<i::ScriptOrModule>::cast(
+        isolate->factory()->NewStruct(i::SCRIPT_OR_MODULE_TYPE));
+    script_or_module->set_resource_name(script->name());
+    script_or_module->set_host_defined_options(script->host_defined_options());
+#ifdef V8_SCRIPTORMODULE_LEGACY_LIFETIME
+    i::Handle<i::ArrayList> list =
+        i::handle(script->script_or_modules(), isolate);
+    list = i::ArrayList::Add(isolate, list, script_or_module);
+    script->set_script_or_modules(*list);
+#endif  // V8_SCRIPTORMODULE_LEGACY_LIFETIME
+    *script_or_module_out = v8::Utils::ToLocal(script_or_module);
   }
-
   return result;
 }
 
@@ -3096,6 +3116,14 @@ MaybeLocal<String> Message::GetSourceLine(Local<Context> context) const {
 void Message::PrintCurrentStackTrace(Isolate* isolate, FILE* out) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+  std::ostringstream stack_trace_stream;
+  i_isolate->PrintCurrentStackTrace(stack_trace_stream);
+  i::PrintF(out, "%s", stack_trace_stream.str().c_str());
+}
+
+void Message::PrintCurrentStackTrace(Isolate* isolate, std::ostream& out) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i_isolate->PrintCurrentStackTrace(out);
 }
 
@@ -3362,7 +3390,6 @@ struct ValueDeserializer::PrivateData {
       : isolate(i), deserializer(i, data, delegate) {}
   i::Isolate* isolate;
   i::ValueDeserializer deserializer;
-  bool has_aborted = false;
   bool supports_legacy_wire_format = false;
 };
 
@@ -3372,16 +3399,8 @@ ValueDeserializer::ValueDeserializer(Isolate* isolate, const uint8_t* data,
 
 ValueDeserializer::ValueDeserializer(Isolate* isolate, const uint8_t* data,
                                      size_t size, Delegate* delegate) {
-  if (base::IsValueInRangeForNumericType<int>(size)) {
-    private_ = new PrivateData(
-        reinterpret_cast<i::Isolate*>(isolate),
-        base::Vector<const uint8_t>(data, static_cast<int>(size)), delegate);
-  } else {
-    private_ =
-        new PrivateData(reinterpret_cast<i::Isolate*>(isolate),
-                        base::Vector<const uint8_t>(nullptr, 0), nullptr);
-    private_->has_aborted = true;
-  }
+  private_ = new PrivateData(reinterpret_cast<i::Isolate*>(isolate),
+                             base::Vector<const uint8_t>(data, size), delegate);
 }
 
 ValueDeserializer::~ValueDeserializer() { delete private_; }
@@ -3390,15 +3409,6 @@ Maybe<bool> ValueDeserializer::ReadHeader(Local<Context> context) {
   auto isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());
   ENTER_V8_NO_SCRIPT(isolate, context, ValueDeserializer, ReadHeader,
                      Nothing<bool>(), i::HandleScope);
-
-  // We could have aborted during the constructor.
-  // If so, ReadHeader is where we report it.
-  if (private_->has_aborted) {
-    isolate->Throw(*isolate->factory()->NewError(
-        i::MessageTemplate::kDataCloneDeserializationError));
-    has_pending_exception = true;
-    RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
-  }
 
   bool read_header = false;
   has_pending_exception = !private_->deserializer.ReadHeader().To(&read_header);
@@ -3423,12 +3433,10 @@ void ValueDeserializer::SetSupportsLegacyWireFormat(
 }
 
 uint32_t ValueDeserializer::GetWireFormatVersion() const {
-  CHECK(!private_->has_aborted);
   return private_->deserializer.GetWireFormatVersion();
 }
 
 MaybeLocal<Value> ValueDeserializer::ReadValue(Local<Context> context) {
-  CHECK(!private_->has_aborted);
   PREPARE_FOR_EXECUTION(context, ValueDeserializer, ReadValue, Value);
   i::MaybeHandle<i::Object> result;
   if (GetWireFormatVersion() > 0) {
@@ -3445,14 +3453,12 @@ MaybeLocal<Value> ValueDeserializer::ReadValue(Local<Context> context) {
 
 void ValueDeserializer::TransferArrayBuffer(uint32_t transfer_id,
                                             Local<ArrayBuffer> array_buffer) {
-  CHECK(!private_->has_aborted);
   private_->deserializer.TransferArrayBuffer(transfer_id,
                                              Utils::OpenHandle(*array_buffer));
 }
 
 void ValueDeserializer::TransferSharedArrayBuffer(
     uint32_t transfer_id, Local<SharedArrayBuffer> shared_array_buffer) {
-  CHECK(!private_->has_aborted);
   private_->deserializer.TransferArrayBuffer(
       transfer_id, Utils::OpenHandle(*shared_array_buffer));
 }
@@ -5617,12 +5623,13 @@ static inline int WriteHelper(i::Isolate* isolate, const String* string,
   int end = start + length;
   if ((length == -1) || (length > str->length() - start)) end = str->length();
   if (end < 0) return 0;
-  if (start < end) i::String::WriteToFlat(*str, buffer, start, end);
+  int write_length = end - start;
+  if (start < end) i::String::WriteToFlat(*str, buffer, start, write_length);
   if (!(options & String::NO_NULL_TERMINATION) &&
-      (length == -1 || end - start < length)) {
-    buffer[end - start] = '\0';
+      (length == -1 || write_length < length)) {
+    buffer[write_length] = '\0';
   }
-  return end - start;
+  return write_length;
 }
 
 int String::WriteOneByte(Isolate* isolate, uint8_t* buffer, int start,
@@ -6102,9 +6109,30 @@ void v8::V8::InitializeExternalStartupDataFromFile(const char* snapshot_blob) {
 const char* v8::V8::GetVersion() { return i::Version::GetVersion(); }
 
 #ifdef V8_VIRTUAL_MEMORY_CAGE
-PageAllocator* v8::V8::GetVirtualMemoryCageDataPageAllocator() {
-  CHECK(i::GetProcessWideVirtualMemoryCage()->is_initialized());
-  return i::GetProcessWideVirtualMemoryCage()->GetDataCagePageAllocator();
+PageAllocator* v8::V8::GetVirtualMemoryCagePageAllocator() {
+  Utils::ApiCheck(i::GetProcessWideVirtualMemoryCage()->is_initialized(),
+                  "v8::V8::GetVirtualMemoryCagePageAllocator",
+                  "The virtual memory cage must be initialized first.");
+  return i::GetProcessWideVirtualMemoryCage()->page_allocator();
+}
+
+size_t v8::V8::GetVirtualMemoryCageSizeInBytes() {
+  if (!i::GetProcessWideVirtualMemoryCage()->is_initialized()) {
+    return 0;
+  } else {
+    return i::GetProcessWideVirtualMemoryCage()->size();
+  }
+}
+
+bool v8::V8::IsUsingSecureVirtualMemoryCage() {
+  Utils::ApiCheck(i::GetProcessWideVirtualMemoryCage()->is_initialized(),
+                  "v8::V8::IsUsingSecureVirtualMemoryCage",
+                  "The virtual memory cage must be initialized first.");
+  // TODO(saelo) For now, we only treat a fake cage as insecure. Once we use
+  // caged pointers that assume that the cage has a constant size, we'll also
+  // treat cages smaller than the default size as insecure because caged
+  // pointers can then access memory outside of them.
+  return !i::GetProcessWideVirtualMemoryCage()->is_fake_cage();
 }
 #endif
 
@@ -6378,7 +6406,7 @@ void Context::DetachGlobal() {
   i::Handle<i::Context> context = Utils::OpenHandle(this);
   i::Isolate* isolate = context->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
-  isolate->bootstrapper()->DetachGlobal(context);
+  isolate->DetachGlobal(context);
 }
 
 Local<v8::Object> Context::GetExtrasBindingObject() {
@@ -7177,7 +7205,7 @@ REGEXP_FLAG_ASSERT_EQ(kLinear);
 
 v8::RegExp::Flags v8::RegExp::GetFlags() const {
   i::Handle<i::JSRegExp> obj = Utils::OpenHandle(this);
-  return RegExp::Flags(static_cast<int>(obj->GetFlags()));
+  return RegExp::Flags(static_cast<int>(obj->flags()));
 }
 
 MaybeLocal<v8::Object> v8::RegExp::Exec(Local<Context> context,
@@ -8451,6 +8479,12 @@ void Isolate::Initialize(Isolate* isolate,
         reinterpret_cast<uintptr_t>(params.constraints.stack_limit());
     i_isolate->stack_guard()->SetStackLimit(limit);
   }
+
+  if (params.experimental_attach_to_shared_isolate != nullptr) {
+    i_isolate->AttachToSharedIsolate(reinterpret_cast<i::Isolate*>(
+        params.experimental_attach_to_shared_isolate));
+  }
+
   // TODO(jochen): Once we got rid of Isolate::Current(), we can remove this.
   Isolate::Scope isolate_scope(isolate);
   if (i_isolate->snapshot_blob() == nullptr) {
@@ -9042,7 +9076,7 @@ void Isolate::IsolateInBackgroundNotification() {
 void Isolate::MemoryPressureNotification(MemoryPressureLevel level) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
   bool on_isolate_thread =
-      v8::Locker::IsActive()
+      v8::Locker::WasEverUsed()
           ? isolate->thread_manager()->IsLockedByCurrentThread()
           : i::ThreadId::Current() == isolate->thread_id();
   isolate->heap()->MemoryPressureNotification(level, on_isolate_thread);
@@ -9183,6 +9217,10 @@ CALLBACK_SETTER(WasmSimdEnabledCallback, WasmSimdEnabledCallback,
 
 CALLBACK_SETTER(WasmExceptionsEnabledCallback, WasmExceptionsEnabledCallback,
                 wasm_exceptions_enabled_callback)
+
+CALLBACK_SETTER(WasmDynamicTieringEnabledCallback,
+                WasmDynamicTieringEnabledCallback,
+                wasm_dynamic_tiering_enabled_callback)
 
 CALLBACK_SETTER(SharedArrayBufferConstructorEnabledCallback,
                 SharedArrayBufferConstructorEnabledCallback,
@@ -9327,7 +9365,7 @@ void v8::Isolate::LocaleConfigurationChangeNotification() {
 
 #ifdef V8_INTL_SUPPORT
   i_isolate->ResetDefaultLocale();
-  i_isolate->ClearCachedIcuObjects();
+  i_isolate->clear_cached_icu_objects();
 #endif  // V8_INTL_SUPPORT
 }
 
@@ -10440,16 +10478,44 @@ bool ConvertDouble(double d) {
 
 }  // namespace internal
 
-bool CopyAndConvertArrayToCppBufferInt32(Local<Array> src, int32_t* dst,
-                                         uint32_t max_length) {
-  return CopyAndConvertArrayToCppBuffer<&v8::kTypeInfoInt32, int32_t>(
-      src, dst, max_length);
+template <>
+bool V8_EXPORT V8_WARN_UNUSED_RESULT TryToCopyAndConvertArrayToCppBuffer<
+    internal::CTypeInfoBuilder<int32_t>::Build().GetId(), int32_t>(
+    Local<Array> src, int32_t* dst, uint32_t max_length) {
+  return CopyAndConvertArrayToCppBuffer<
+      CTypeInfo(CTypeInfo::Type::kInt32, CTypeInfo::SequenceType::kIsSequence)
+          .GetId(),
+      int32_t>(src, dst, max_length);
 }
 
-bool CopyAndConvertArrayToCppBufferFloat64(Local<Array> src, double* dst,
-                                           uint32_t max_length) {
-  return CopyAndConvertArrayToCppBuffer<&v8::kTypeInfoFloat64, double>(
-      src, dst, max_length);
+template <>
+bool V8_EXPORT V8_WARN_UNUSED_RESULT TryToCopyAndConvertArrayToCppBuffer<
+    internal::CTypeInfoBuilder<uint32_t>::Build().GetId(), uint32_t>(
+    Local<Array> src, uint32_t* dst, uint32_t max_length) {
+  return CopyAndConvertArrayToCppBuffer<
+      CTypeInfo(CTypeInfo::Type::kUint32, CTypeInfo::SequenceType::kIsSequence)
+          .GetId(),
+      uint32_t>(src, dst, max_length);
+}
+
+template <>
+bool V8_EXPORT V8_WARN_UNUSED_RESULT TryToCopyAndConvertArrayToCppBuffer<
+    internal::CTypeInfoBuilder<float>::Build().GetId(), float>(
+    Local<Array> src, float* dst, uint32_t max_length) {
+  return CopyAndConvertArrayToCppBuffer<
+      CTypeInfo(CTypeInfo::Type::kFloat32, CTypeInfo::SequenceType::kIsSequence)
+          .GetId(),
+      float>(src, dst, max_length);
+}
+
+template <>
+bool V8_EXPORT V8_WARN_UNUSED_RESULT TryToCopyAndConvertArrayToCppBuffer<
+    internal::CTypeInfoBuilder<double>::Build().GetId(), double>(
+    Local<Array> src, double* dst, uint32_t max_length) {
+  return CopyAndConvertArrayToCppBuffer<
+      CTypeInfo(CTypeInfo::Type::kFloat64, CTypeInfo::SequenceType::kIsSequence)
+          .GetId(),
+      double>(src, dst, max_length);
 }
 
 }  // namespace v8

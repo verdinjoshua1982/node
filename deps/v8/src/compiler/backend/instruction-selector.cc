@@ -1195,9 +1195,7 @@ void InstructionSelector::VisitBlock(BasicBlock* block) {
     if (node->opcode() == IrOpcode::kStore ||
         node->opcode() == IrOpcode::kUnalignedStore ||
         node->opcode() == IrOpcode::kCall ||
-        node->opcode() == IrOpcode::kProtectedLoad ||
         node->opcode() == IrOpcode::kProtectedStore ||
-        node->opcode() == IrOpcode::kLoadTransform ||
 #define ADD_EFFECT_FOR_ATOMIC_OP(Opcode) \
   node->opcode() == IrOpcode::k##Opcode ||
         MACHINE_ATOMIC_OP_LIST(ADD_EFFECT_FOR_ATOMIC_OP)
@@ -1454,8 +1452,8 @@ void InstructionSelector::VisitNode(Node* node) {
     case IrOpcode::kStateValues:
     case IrOpcode::kObjectState:
       return;
-    case IrOpcode::kAbortCSAAssert:
-      VisitAbortCSAAssert(node);
+    case IrOpcode::kAbortCSADcheck:
+      VisitAbortCSADcheck(node);
       return;
     case IrOpcode::kDebugBreak:
       VisitDebugBreak(node);
@@ -2354,6 +2352,14 @@ void InstructionSelector::VisitNode(Node* node) {
       return MarkAsWord32(node), VisitI16x8AllTrue(node);
     case IrOpcode::kI8x16AllTrue:
       return MarkAsWord32(node), VisitI8x16AllTrue(node);
+    case IrOpcode::kI8x16RelaxedLaneSelect:
+      return MarkAsSimd128(node), VisitI8x16RelaxedLaneSelect(node);
+    case IrOpcode::kI16x8RelaxedLaneSelect:
+      return MarkAsSimd128(node), VisitI16x8RelaxedLaneSelect(node);
+    case IrOpcode::kI32x4RelaxedLaneSelect:
+      return MarkAsSimd128(node), VisitI32x4RelaxedLaneSelect(node);
+    case IrOpcode::kI64x2RelaxedLaneSelect:
+      return MarkAsSimd128(node), VisitI64x2RelaxedLaneSelect(node);
     default:
       FATAL("Unexpected operator #%d:%s @ node #%d", node->opcode(),
             node->op()->mnemonic(), node->id());
@@ -2767,6 +2773,21 @@ void InstructionSelector::VisitF32x4Qfms(Node* node) { UNIMPLEMENTED(); }
 #endif  // !V8_TARGET_ARCH_ARM64
 #endif  // !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_S390X && !V8_TARGET_ARCH_PPC64
 
+#if !V8_TARGET_ARCH_X64
+void InstructionSelector::VisitI8x16RelaxedLaneSelect(Node* node) {
+  UNIMPLEMENTED();
+}
+void InstructionSelector::VisitI16x8RelaxedLaneSelect(Node* node) {
+  UNIMPLEMENTED();
+}
+void InstructionSelector::VisitI32x4RelaxedLaneSelect(Node* node) {
+  UNIMPLEMENTED();
+}
+void InstructionSelector::VisitI64x2RelaxedLaneSelect(Node* node) {
+  UNIMPLEMENTED();
+}
+#endif  // !V8_TARGET_ARCH_X64
+
 void InstructionSelector::VisitFinishRegion(Node* node) { EmitIdentity(node); }
 
 void InstructionSelector::VisitParameter(Node* node) {
@@ -2786,7 +2807,7 @@ namespace {
 
 LinkageLocation ExceptionLocation() {
   return LinkageLocation::ForRegister(kReturnRegister0.code(),
-                                      MachineType::IntPtr());
+                                      MachineType::TaggedPointer());
 }
 
 constexpr InstructionCode EncodeCallDescriptorFlags(
@@ -2916,16 +2937,20 @@ void InstructionSelector::VisitCall(Node* node, BasicBlock* handler) {
   InstructionCode opcode;
   switch (call_descriptor->kind()) {
     case CallDescriptor::kCallAddress: {
-      int misc_field = static_cast<int>(call_descriptor->ParameterCount());
+      int gp_param_count =
+          static_cast<int>(call_descriptor->GPParameterCount());
+      int fp_param_count =
+          static_cast<int>(call_descriptor->FPParameterCount());
 #if ABI_USES_FUNCTION_DESCRIPTORS
-      // Highest misc_field bit is used on AIX to indicate if a CFunction call
-      // has function descriptor or not.
-      STATIC_ASSERT(MiscField::kSize == kHasFunctionDescriptorBitShift + 1);
+      // Highest fp_param_count bit is used on AIX to indicate if a CFunction
+      // call has function descriptor or not.
+      STATIC_ASSERT(FPParamField::kSize == kHasFunctionDescriptorBitShift + 1);
       if (!call_descriptor->NoFunctionDescriptor()) {
-        misc_field |= 1 << kHasFunctionDescriptorBitShift;
+        fp_param_count |= 1 << kHasFunctionDescriptorBitShift;
       }
 #endif
-      opcode = kArchCallCFunction | MiscField::encode(misc_field);
+      opcode = kArchCallCFunction | ParamField::encode(gp_param_count) |
+               FPParamField::encode(fp_param_count);
       break;
     }
     case CallDescriptor::kCallCodeObject:

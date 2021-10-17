@@ -19,6 +19,7 @@
 #include "src/objects/js-function.h"
 #include "src/objects/js-objects.h"
 #include "src/objects/objects.h"
+#include "src/wasm/stacks.h"
 #include "src/wasm/struct-types.h"
 #include "src/wasm/value-type.h"
 
@@ -182,9 +183,6 @@ class WasmModuleObject
 class WasmTableObject
     : public TorqueGeneratedWasmTableObject<WasmTableObject, JSObject> {
  public:
-  // Dispatched behavior.
-  DECL_PRINTER(WasmTableObject)
-
   inline wasm::ValueType type();
 
   V8_EXPORT_PRIVATE static int Grow(Isolate* isolate,
@@ -194,7 +192,8 @@ class WasmTableObject
   V8_EXPORT_PRIVATE static Handle<WasmTableObject> New(
       Isolate* isolate, Handle<WasmInstanceObject> instance,
       wasm::ValueType type, uint32_t initial, bool has_maximum,
-      uint32_t maximum, Handle<FixedArray>* entries);
+      uint32_t maximum, Handle<FixedArray>* entries,
+      Handle<Object> initial_value);
 
   V8_EXPORT_PRIVATE static void AddDispatchTable(
       Isolate* isolate, Handle<WasmTableObject> table,
@@ -265,9 +264,6 @@ class WasmMemoryObject
     : public TorqueGeneratedWasmMemoryObject<WasmMemoryObject, JSObject> {
  public:
   DECL_OPTIONAL_ACCESSORS(instances, WeakArrayList)
-
-  // Dispatched behavior.
-  DECL_PRINTER(WasmMemoryObject)
 
   // Add an instance to the internal (weak) list.
   V8_EXPORT_PRIVATE static void AddInstance(Isolate* isolate,
@@ -354,6 +350,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_OPTIONAL_ACCESSORS(tags_table, FixedArray)
   DECL_OPTIONAL_ACCESSORS(wasm_external_functions, FixedArray)
   DECL_ACCESSORS(managed_object_maps, FixedArray)
+  DECL_ACCESSORS(feedback_vectors, FixedArray)
   DECL_PRIMITIVE_ACCESSORS(memory_start, byte*)
   DECL_PRIMITIVE_ACCESSORS(memory_size, size_t)
   DECL_PRIMITIVE_ACCESSORS(isolate_root, Address)
@@ -430,6 +427,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kTagsTableOffset, kTaggedSize)                                        \
   V(kWasmExternalFunctionsOffset, kTaggedSize)                            \
   V(kManagedObjectMapsOffset, kTaggedSize)                                \
+  V(kFeedbackVectorsOffset, kTaggedSize)                                  \
   V(kBreakOnEntryOffset, kUInt8Size)                                      \
   /* More padding to make the header pointer-size aligned */              \
   V(kHeaderPaddingOffset, POINTER_SIZE_PADDING(kHeaderPaddingOffset))     \
@@ -465,7 +463,8 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
       kManagedNativeAllocationsOffset,
       kTagsTableOffset,
       kWasmExternalFunctionsOffset,
-      kManagedObjectMapsOffset};
+      kManagedObjectMapsOffset,
+      kFeedbackVectorsOffset};
 
   const wasm::WasmModule* module();
 
@@ -553,9 +552,6 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
 class WasmTagObject
     : public TorqueGeneratedWasmTagObject<WasmTagObject, JSObject> {
  public:
-  // Dispatched behavior.
-  DECL_PRINTER(WasmTagObject)
-
   // Checks whether the given {sig} has the same parameter types as the
   // serialized signature stored within this tag object.
   bool MatchesSignature(const wasm::FunctionSig* sig);
@@ -700,7 +696,8 @@ class WasmIndirectFunctionTable
 
   DECL_PRINTER(WasmIndirectFunctionTable)
 
-  STATIC_ASSERT(kStartOfStrongFieldsOffset == kManagedNativeAllocationsOffset);
+  static constexpr int kStartOfStrongFieldsOffset =
+      kManagedNativeAllocationsOffset;
   using BodyDescriptor = FlexibleBodyDescriptor<kStartOfStrongFieldsOffset>;
 
   TQ_OBJECT_CONSTRUCTORS(WasmIndirectFunctionTable)
@@ -713,6 +710,9 @@ class WasmFunctionData
   DECL_ACCESSORS(wrapper_code, Code)
 
   DECL_PRINTER(WasmFunctionData)
+
+  // All fields after those inherited from Foreign are tagged.
+  static constexpr int kStartOfStrongFieldsOffset = Foreign::kHeaderSize;
 
   TQ_OBJECT_CONSTRUCTORS(WasmFunctionData)
 };
@@ -732,6 +732,8 @@ class WasmExportedFunctionData
 
   class BodyDescriptor;
 
+  static constexpr int kEndOfStrongFieldsOffset = kHeaderSize;
+
   TQ_OBJECT_CONSTRUCTORS(WasmExportedFunctionData)
 };
 
@@ -749,6 +751,8 @@ class WasmJSFunctionData
 
   class BodyDescriptor;
 
+  static constexpr int kEndOfStrongFieldsOffset = kHeaderSize;
+
  private:
   DECL_ACCESSORS(raw_wasm_to_js_wrapper_code, CodeT)
 
@@ -762,6 +766,8 @@ class WasmCapiFunctionData
   DECL_PRINTER(WasmCapiFunctionData)
 
   class BodyDescriptor;
+
+  static constexpr int kEndOfStrongFieldsOffset = kHeaderSize;
 
   TQ_OBJECT_CONSTRUCTORS(WasmCapiFunctionData)
 };
@@ -839,8 +845,6 @@ class WasmExceptionTag
  public:
   V8_EXPORT_PRIVATE static Handle<WasmExceptionTag> New(Isolate* isolate,
                                                         int index);
-
-  DECL_PRINTER(WasmExceptionTag)
 
   TQ_OBJECT_CONSTRUCTORS(WasmExceptionTag)
 };
@@ -935,8 +939,8 @@ class WasmArray : public TorqueGeneratedWasmArray<WasmArray, WasmObject> {
 
   // Get the {ObjectSlot} corresponding to the element at {index}. Requires that
   // this is a reference array.
-  ObjectSlot ElementSlot(uint32_t index);
-  wasm::WasmValue GetElement(uint32_t index);
+  inline ObjectSlot ElementSlot(uint32_t index);
+  V8_EXPORT_PRIVATE wasm::WasmValue GetElement(uint32_t index);
 
   static inline int SizeFor(Map map, int length);
 
@@ -945,8 +949,9 @@ class WasmArray : public TorqueGeneratedWasmArray<WasmArray, WasmObject> {
                                           Handle<WasmArray> array,
                                           uint32_t index);
 
-  // Returns the Address of the element at {index}.
-  Address ElementAddress(uint32_t index);
+  // Returns the offset/Address of the element at {index}.
+  inline uint32_t element_offset(uint32_t index);
+  inline Address ElementAddress(uint32_t index);
 
   static int MaxLength(const wasm::ArrayType* type) {
     // The total object size must fit into a Smi, for filler objects. To make
@@ -964,6 +969,24 @@ class WasmArray : public TorqueGeneratedWasmArray<WasmArray, WasmObject> {
   class BodyDescriptor;
 
   TQ_OBJECT_CONSTRUCTORS(WasmArray)
+};
+
+class WasmContinuationObject
+    : public TorqueGeneratedWasmContinuationObject<WasmContinuationObject,
+                                                   Struct> {
+ public:
+  static Handle<WasmContinuationObject> New(
+      Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack);
+  static Handle<WasmContinuationObject> New(Isolate* isolate,
+                                            WasmContinuationObject parent);
+
+  DECL_PRINTER(WasmContinuationObject)
+  TQ_OBJECT_CONSTRUCTORS(WasmContinuationObject)
+
+ private:
+  static Handle<WasmContinuationObject> New(
+      Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack,
+      HeapObject parent);
 };
 
 #undef DECL_OPTIONAL_ACCESSORS

@@ -175,6 +175,7 @@
   V(JSLoadNamedFromSuper)         \
   V(JSLoadGlobal)                 \
   V(JSStoreProperty)              \
+  V(JSDefineProperty)             \
   V(JSStoreNamed)                 \
   V(JSStoreNamedOwn)              \
   V(JSStoreGlobal)                \
@@ -681,7 +682,7 @@
   MACHINE_FLOAT64_BINOP_LIST(V)          \
   MACHINE_FLOAT64_UNOP_LIST(V)           \
   MACHINE_ATOMIC_OP_LIST(V)              \
-  V(AbortCSAAssert)                      \
+  V(AbortCSADcheck)                      \
   V(DebugBreak)                          \
   V(Comment)                             \
   V(Load)                                \
@@ -980,6 +981,10 @@
   V(S128Select)                 \
   V(S128AndNot)                 \
   V(I8x16Swizzle)               \
+  V(I8x16RelaxedLaneSelect)     \
+  V(I16x8RelaxedLaneSelect)     \
+  V(I32x4RelaxedLaneSelect)     \
+  V(I64x2RelaxedLaneSelect)     \
   V(I8x16Shuffle)               \
   V(V128AnyTrue)                \
   V(I64x2AllTrue)               \
@@ -1120,6 +1125,7 @@ class V8_EXPORT_PRIVATE IrOpcode {
       case kJSCreateLiteralArray:
       case kJSCreateLiteralObject:
       case kJSCreateLiteralRegExp:
+      case kJSDefineProperty:
       case kJSForInNext:
       case kJSForInPrepare:
       case kJSGetIterator:

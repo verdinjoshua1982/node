@@ -828,15 +828,8 @@ class Code::BodyDescriptor final : public BodyDescriptorBase {
     // GC does not visit data/code in the header and in the body directly.
     IteratePointers(obj, kRelocationInfoOffset, kDataStart, v);
 
-    Code code = Code::cast(obj);
-    HeapObject relocation_info =
-        code.synchronized_unchecked_relocation_info_or_undefined();
-
-    if (!relocation_info.IsUndefined()) {
-      RelocIterator it(code, ByteArray::unchecked_cast(relocation_info),
-                       kRelocModeMask);
-      v->VisitRelocInfo(&it);
-    }
+    RelocIterator it(Code::cast(obj), kRelocModeMask);
+    v->VisitRelocInfo(&it);
   }
 
   template <typename ObjectVisitor>
@@ -848,28 +841,6 @@ class Code::BodyDescriptor final : public BodyDescriptorBase {
   static inline int SizeOf(Map map, HeapObject object) {
     return Code::unchecked_cast(object).CodeSize();
   }
-};
-
-class Map::BodyDescriptor final : public BodyDescriptorBase {
- public:
-  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
-    static_assert(
-        Map::kEndOfStrongFieldsOffset == Map::kStartOfWeakFieldsOffset,
-        "Leverage that weak fields directly follow strong fields for the "
-        "check below");
-    return offset >= Map::kStartOfStrongFieldsOffset &&
-           offset < Map::kEndOfWeakFieldsOffset;
-  }
-
-  template <typename ObjectVisitor>
-  static inline void IterateBody(Map map, HeapObject obj, int object_size,
-                                 ObjectVisitor* v) {
-    IteratePointers(obj, Map::kStartOfStrongFieldsOffset,
-                    Map::kEndOfStrongFieldsOffset, v);
-    IterateMaybeWeakPointer(obj, kTransitionsOrPrototypeInfoOffset, v);
-  }
-
-  static inline int SizeOf(Map map, HeapObject obj) { return Map::kSize; }
 };
 
 class DataHandler::BodyDescriptor final : public BodyDescriptorBase {
@@ -931,7 +902,7 @@ class CodeDataContainer::BodyDescriptor final : public BodyDescriptorBase {
         CodeDataContainer::kPointerFieldsWeakEndOffset, v);
 
     if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-      v->VisitCodePointer(obj, obj.RawField(kCodeOffset));
+      v->VisitCodePointer(obj, obj.RawCodeField(kCodeOffset));
     }
   }
 
@@ -1112,8 +1083,19 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
     case JS_SPECIAL_API_OBJECT_TYPE:
     case JS_STRING_ITERATOR_PROTOTYPE_TYPE:
     case JS_STRING_ITERATOR_TYPE:
+    case JS_TEMPORAL_CALENDAR_TYPE:
+    case JS_TEMPORAL_DURATION_TYPE:
+    case JS_TEMPORAL_INSTANT_TYPE:
+    case JS_TEMPORAL_PLAIN_DATE_TYPE:
+    case JS_TEMPORAL_PLAIN_DATE_TIME_TYPE:
+    case JS_TEMPORAL_PLAIN_MONTH_DAY_TYPE:
+    case JS_TEMPORAL_PLAIN_TIME_TYPE:
+    case JS_TEMPORAL_PLAIN_YEAR_MONTH_TYPE:
+    case JS_TEMPORAL_TIME_ZONE_TYPE:
+    case JS_TEMPORAL_ZONED_DATE_TIME_TYPE:
     case JS_TYPED_ARRAY_PROTOTYPE_TYPE:
     case JS_FUNCTION_TYPE:
+    case JS_CLASS_CONSTRUCTOR_TYPE:
     case JS_PROMISE_CONSTRUCTOR_TYPE:
     case JS_REG_EXP_CONSTRUCTOR_TYPE:
     case JS_ARRAY_CONSTRUCTOR_TYPE:
@@ -1167,8 +1149,6 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
       return Op::template apply<JSProxy::BodyDescriptor>(p1, p2, p3, p4);
     case FOREIGN_TYPE:
       return Op::template apply<Foreign::BodyDescriptor>(p1, p2, p3, p4);
-    case MAP_TYPE:
-      return Op::template apply<Map::BodyDescriptor>(p1, p2, p3, p4);
     case CODE_TYPE:
       return Op::template apply<Code::BodyDescriptor>(p1, p2, p3, p4);
     case CELL_TYPE:

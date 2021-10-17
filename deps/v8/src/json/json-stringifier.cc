@@ -315,9 +315,9 @@ bool JsonStringifier::InitializeGap(Handle<Object> gap) {
       gap_[gap_length] = '\0';
     }
   } else if (gap->IsNumber()) {
-    int num_value = DoubleToInt32(gap->Number());
-    if (num_value > 0) {
-      int gap_length = std::min(num_value, 10);
+    double value = std::min(gap->Number(), 10.0);
+    if (value > 0) {
+      int gap_length = DoubleToInt32(value);
       gap_ = NewArray<base::uc16>(gap_length + 1);
       for (int i = 0; i < gap_length; i++) gap_[i] = ' ';
       gap_[gap_length] = '\0';
@@ -777,12 +777,13 @@ JsonStringifier::Result JsonStringifier::SerializeJSObject(
                         isolate_);
       // TODO(rossberg): Should this throw?
       if (!name->IsString()) continue;
-      Handle<String> key = Handle<String>::cast(name);
+      Handle<String> key_name = Handle<String>::cast(name);
       PropertyDetails details =
           map->instance_descriptors(isolate_).GetDetails(i);
       if (details.IsDontEnum()) continue;
       Handle<Object> property;
-      if (details.location() == kField && *map == object->map()) {
+      if (details.location() == PropertyLocation::kField &&
+          *map == object->map()) {
         DCHECK_EQ(kData, details.kind());
         FieldIndex field_index = FieldIndex::ForDescriptor(*map, i);
         property = JSObject::FastPropertyAt(object, details.representation(),
@@ -790,9 +791,10 @@ JsonStringifier::Result JsonStringifier::SerializeJSObject(
       } else {
         ASSIGN_RETURN_ON_EXCEPTION_VALUE(
             isolate_, property,
-            Object::GetPropertyOrElement(isolate_, object, key), EXCEPTION);
+            Object::GetPropertyOrElement(isolate_, object, key_name),
+            EXCEPTION);
       }
-      Result result = SerializeProperty(property, comma, key);
+      Result result = SerializeProperty(property, comma, key_name);
       if (!comma && result == SUCCESS) comma = true;
       if (result == EXCEPTION) return result;
     }

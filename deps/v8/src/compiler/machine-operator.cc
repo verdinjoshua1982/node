@@ -598,7 +598,10 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
   V(I32x4AllTrue, Operator::kNoProperties, 1, 0, 1)                        \
   V(I16x8AllTrue, Operator::kNoProperties, 1, 0, 1)                        \
   V(I8x16AllTrue, Operator::kNoProperties, 1, 0, 1)                        \
-  V(I8x16Swizzle, Operator::kNoProperties, 2, 0, 1)
+  V(I8x16RelaxedLaneSelect, Operator::kNoProperties, 3, 0, 1)              \
+  V(I16x8RelaxedLaneSelect, Operator::kNoProperties, 3, 0, 1)              \
+  V(I32x4RelaxedLaneSelect, Operator::kNoProperties, 3, 0, 1)              \
+  V(I64x2RelaxedLaneSelect, Operator::kNoProperties, 3, 0, 1)
 
 // The format is:
 // V(Name, properties, value_input_count, control_input_count, output_count)
@@ -1242,12 +1245,12 @@ struct MachineOperatorGlobalCache {
   };
   BitcastMaybeObjectToWordOperator kBitcastMaybeObjectToWord;
 
-  struct AbortCSAAssertOperator : public Operator {
-    AbortCSAAssertOperator()
-        : Operator(IrOpcode::kAbortCSAAssert, Operator::kNoThrow,
-                   "AbortCSAAssert", 1, 1, 1, 0, 1, 0) {}
+  struct AbortCSADcheckOperator : public Operator {
+    AbortCSADcheckOperator()
+        : Operator(IrOpcode::kAbortCSADcheck, Operator::kNoThrow,
+                   "AbortCSADcheck", 1, 1, 1, 0, 1, 0) {}
   };
-  AbortCSAAssertOperator kAbortCSAAssert;
+  AbortCSADcheckOperator kAbortCSADcheck;
 
   struct DebugBreakOperator : public Operator {
     DebugBreakOperator()
@@ -1282,6 +1285,19 @@ struct MachineOperatorGlobalCache {
   STACK_POINTER_GREATER_THAN(CodeStubAssembler)
   STACK_POINTER_GREATER_THAN(Wasm)
 #undef STACK_POINTER_GREATER_THAN
+
+  struct I8x16SwizzleOperator final : public Operator1<bool> {
+    I8x16SwizzleOperator()
+        : Operator1<bool>(IrOpcode::kI8x16Swizzle, Operator::kPure,
+                          "I8x16Swizzle", 2, 0, 0, 1, 0, 0, false) {}
+  };
+  I8x16SwizzleOperator kI8x16Swizzle;
+  struct I8x16RelaxedSwizzleOperator final : public Operator1<bool> {
+    I8x16RelaxedSwizzleOperator()
+        : Operator1<bool>(IrOpcode::kI8x16Swizzle, Operator::kPure,
+                          "I8x16RelaxedSwizzle", 2, 0, 0, 1, 0, 0, true) {}
+  };
+  I8x16RelaxedSwizzleOperator kI8x16RelaxedSwizzle;
 };
 
 struct CommentOperator : public Operator1<const char*> {
@@ -1626,8 +1642,8 @@ const Operator* MachineOperatorBuilder::BitcastMaybeObjectToWord() {
   return &cache_.kBitcastMaybeObjectToWord;
 }
 
-const Operator* MachineOperatorBuilder::AbortCSAAssert() {
-  return &cache_.kAbortCSAAssert;
+const Operator* MachineOperatorBuilder::AbortCSADcheck() {
+  return &cache_.kAbortCSADcheck;
 }
 
 const Operator* MachineOperatorBuilder::DebugBreak() {
@@ -2001,6 +2017,14 @@ const Operator* MachineOperatorBuilder::I8x16Shuffle(
   return zone_->New<Operator1<S128ImmediateParameter>>(
       IrOpcode::kI8x16Shuffle, Operator::kPure, "Shuffle", 2, 0, 0, 1, 0, 0,
       S128ImmediateParameter(shuffle));
+}
+
+const Operator* MachineOperatorBuilder::I8x16Swizzle(bool relaxed) {
+  if (relaxed) {
+    return &cache_.kI8x16RelaxedSwizzle;
+  } else {
+    return &cache_.kI8x16Swizzle;
+  }
 }
 
 StackCheckKind StackCheckKindOf(Operator const* op) {

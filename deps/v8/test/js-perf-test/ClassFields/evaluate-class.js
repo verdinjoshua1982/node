@@ -33,6 +33,12 @@ switch (TEST_TYPE) {
   case "private-field-multiple":
     factory = EvaluateMultiPrivateFieldClass;
     break;
+  case "computed-field-single":
+    factory = EvaluateSingleComputedFieldClass;
+    break;
+  case "computed-field-multiple":
+    factory = EvaluateMultiComputedFieldClass;
+    break;
 
   default:
     throw new Error("Unknown optimization configuration " + arguments.join(' '));

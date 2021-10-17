@@ -153,6 +153,8 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) FactoryBase
   Handle<Script> NewScriptWithId(Handle<PrimitiveHeapObject> source,
                                  int script_id);
 
+  Handle<ArrayList> NewArrayList(int size);
+
   Handle<SharedFunctionInfo> NewSharedFunctionInfoForLiteral(
       FunctionLiteral* literal, Handle<Script> script, bool is_toplevel);
 
@@ -233,6 +235,11 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) FactoryBase
       int capacity, AllocationType allocation);
 
   Handle<FunctionTemplateRareData> NewFunctionTemplateRareData();
+
+  MaybeHandle<Map> GetInPlaceInternalizedStringMap(Map from_string_map);
+
+  AllocationType RefineAllocationTypeForInPlaceInternalizableString(
+      AllocationType allocation, Map string_map);
 
  protected:
   // Allocate memory for an uninitialized array (e.g., a FixedArray or similar).

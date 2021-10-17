@@ -273,9 +273,6 @@ Local<Function> GetBuiltin(Isolate* isolate, Builtin builtin);
 V8_EXPORT_PRIVATE void SetConsoleDelegate(Isolate* isolate,
                                           ConsoleDelegate* delegate);
 
-V8_DEPRECATED("See http://crbug.com/v8/10566.")
-int GetStackFrameId(v8::Local<v8::StackFrame> frame);
-
 v8::Local<v8::StackTrace> GetDetailedStackTrace(Isolate* isolate,
                                                 v8::Local<v8::Object> error);
 
@@ -619,7 +616,8 @@ class V8_EXPORT_PRIVATE PropertyIterator {
   // Creating a PropertyIterator can potentially throw an exception.
   // The returned std::unique_ptr is empty iff that happens.
   V8_WARN_UNUSED_RESULT static std::unique_ptr<PropertyIterator> Create(
-      v8::Local<v8::Context> context, v8::Local<v8::Object> object);
+      v8::Local<v8::Context> context, v8::Local<v8::Object> object,
+      bool skip_indices = false);
 
   virtual ~PropertyIterator() = default;
 

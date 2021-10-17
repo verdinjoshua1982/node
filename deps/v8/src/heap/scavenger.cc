@@ -54,7 +54,8 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
     HandleSlot(host, FullHeapObjectSlot(&target), target);
   }
   V8_INLINE void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) final {
-    HeapObject heap_object = rinfo->target_object();
+    PtrComprCageBase cage_base = host.main_cage_base();
+    HeapObject heap_object = rinfo->target_object(cage_base);
     HandleSlot(host, FullHeapObjectSlot(&heap_object), heap_object);
   }
 
@@ -490,7 +491,8 @@ void ScavengerCollector::IterateStackAndScavenge(
 }
 
 void ScavengerCollector::SweepArrayBufferExtensions() {
-  heap_->array_buffer_sweeper()->RequestSweepYoung();
+  heap_->array_buffer_sweeper()->RequestSweep(
+      ArrayBufferSweeper::SweepingType::kYoung);
 }
 
 void ScavengerCollector::HandleSurvivingNewLargeObjects() {
@@ -545,9 +547,12 @@ Scavenger::Scavenger(ScavengerCollector* collector, Heap* heap, bool is_logging,
       copied_size_(0),
       promoted_size_(0),
       allocator_(heap, CompactionSpaceKind::kCompactionSpaceForScavenge),
+      shared_old_allocator_(heap_->shared_old_allocator_.get()),
       is_logging_(is_logging),
       is_incremental_marking_(heap->incremental_marking()->IsMarking()),
-      is_compacting_(heap->incremental_marking()->IsCompacting()) {}
+      is_compacting_(heap->incremental_marking()->IsCompacting()),
+      shared_string_table_(FLAG_shared_string_table &&
+                           (heap->isolate()->shared_isolate() != nullptr)) {}
 
 void Scavenger::IterateAndScavengePromotedObject(HeapObject target, Map map,
                                                  int size) {
@@ -779,7 +784,8 @@ RootScavengeVisitor::RootScavengeVisitor(Scavenger* scavenger)
     : scavenger_(scavenger) {}
 
 ScavengeVisitor::ScavengeVisitor(Scavenger* scavenger)
-    : scavenger_(scavenger) {}
+    : NewSpaceVisitor<ScavengeVisitor>(scavenger->heap()->isolate()),
+      scavenger_(scavenger) {}
 
 }  // namespace internal
 }  // namespace v8

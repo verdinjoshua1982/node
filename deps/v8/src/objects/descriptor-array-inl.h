@@ -91,11 +91,10 @@ InternalIndex DescriptorArray::SearchWithCache(Isolate* isolate, Name name,
 }
 
 ObjectSlot DescriptorArray::GetFirstPointerSlot() {
-  static_assert(kEndOfStrongFieldsOffset == kStartOfWeakFieldsOffset,
-                "Weak and strong fields are continuous.");
-  static_assert(kEndOfWeakFieldsOffset == kHeaderSize,
-                "Weak fields extend up to the end of the header.");
-  return RawField(DescriptorArray::kStartOfStrongFieldsOffset);
+  static_assert(kEnumCacheOffset + kTaggedSize == kHeaderSize,
+                "The strong field for enum_cache is contiguous with the "
+                "variable-size portion.");
+  return RawField(DescriptorArray::kEnumCacheOffset);
 }
 
 ObjectSlot DescriptorArray::GetDescriptorSlot(int descriptor) {
@@ -189,7 +188,7 @@ void DescriptorArray::SetDetails(InternalIndex descriptor_number,
 }
 
 int DescriptorArray::GetFieldIndex(InternalIndex descriptor_number) {
-  DCHECK_EQ(GetDetails(descriptor_number).location(), kField);
+  DCHECK_EQ(GetDetails(descriptor_number).location(), PropertyLocation::kField);
   return GetDetails(descriptor_number).field_index();
 }
 
@@ -200,7 +199,7 @@ FieldType DescriptorArray::GetFieldType(InternalIndex descriptor_number) {
 
 FieldType DescriptorArray::GetFieldType(PtrComprCageBase cage_base,
                                         InternalIndex descriptor_number) {
-  DCHECK_EQ(GetDetails(descriptor_number).location(), kField);
+  DCHECK_EQ(GetDetails(descriptor_number).location(), PropertyLocation::kField);
   MaybeObject wrapped_type = GetValue(cage_base, descriptor_number);
   return Map::UnwrapFieldType(wrapped_type);
 }

@@ -447,6 +447,8 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(WasmLoadSourceMapCallback, wasm_load_source_map_callback, nullptr)        \
   V(WasmSimdEnabledCallback, wasm_simd_enabled_callback, nullptr)             \
   V(WasmExceptionsEnabledCallback, wasm_exceptions_enabled_callback, nullptr) \
+  V(WasmDynamicTieringEnabledCallback, wasm_dynamic_tiering_enabled_callback, \
+    nullptr)                                                                  \
   /* State for Relocatable. */                                                \
   V(Relocatable*, relocatable_top, nullptr)                                   \
   V(DebugObjectCache*, string_stream_debug_object_cache, nullptr)             \
@@ -612,7 +614,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   bool InitWithoutSnapshot();
   bool InitWithSnapshot(SnapshotData* startup_snapshot_data,
-                        SnapshotData* read_only_snapshot_data, bool can_rehash);
+                        SnapshotData* read_only_snapshot_data,
+                        SnapshotData* shared_heap_snapshot_data,
+                        bool can_rehash);
 
   // True if at least one thread Enter'ed this isolate.
   bool IsInUse() { return entry_stack_ != nullptr; }
@@ -715,6 +719,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   bool IsWasmSimdEnabled(Handle<Context> context);
   bool AreWasmExceptionsEnabled(Handle<Context> context);
+  bool IsWasmDynamicTieringEnabled();
 
   THREAD_LOCAL_TOP_ADDRESS(Context, pending_handler_context)
   THREAD_LOCAL_TOP_ADDRESS(Address, pending_handler_entrypoint)
@@ -853,7 +858,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
       v8::Isolate::AbortOnUncaughtExceptionCallback callback);
 
   enum PrintStackMode { kPrintStackConcise, kPrintStackVerbose };
-  void PrintCurrentStackTrace(FILE* out);
+  void PrintCurrentStackTrace(std::ostream& out);
   void PrintStack(StringStream* accumulator,
                   PrintStackMode mode = kPrintStackVerbose);
   void PrintStack(FILE* out, PrintStackMode mode = kPrintStackVerbose);
@@ -1075,6 +1080,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
                    isolate_data()->cage_base() == kNullAddress);
     return isolate_data()->cage_base();
   }
+
+  Address code_cage_base() const { return cage_base(); }
 
   // When pointer compression is on, the PtrComprCage used by this
   // Isolate. Otherwise nullptr.
@@ -1350,18 +1357,18 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     default_locale_ = locale;
   }
 
-  // enum to access the icu object cache.
   enum class ICUObjectCacheType{
       kDefaultCollator, kDefaultNumberFormat, kDefaultSimpleDateFormat,
       kDefaultSimpleDateFormatForTime, kDefaultSimpleDateFormatForDate};
+  static constexpr int kICUObjectCacheTypeCount = 5;
 
   icu::UMemory* get_cached_icu_object(ICUObjectCacheType cache_type,
                                       Handle<Object> locales);
   void set_icu_object_in_cache(ICUObjectCacheType cache_type,
-                               Handle<Object> locale,
+                               Handle<Object> locales,
                                std::shared_ptr<icu::UMemory> obj);
   void clear_cached_icu_object(ICUObjectCacheType cache_type);
-  void ClearCachedIcuObjects();
+  void clear_cached_icu_objects();
 
 #endif  // V8_INTL_SUPPORT
 
@@ -1489,6 +1496,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void SetUseCounterCallback(v8::Isolate::UseCounterCallback callback);
   void CountUsage(v8::Isolate::UseCounterFeature feature);
+  void CountUsage(v8::Isolate::UseCounterFeature feature, int count);
 
   static std::string GetTurboCfgFileName(Isolate* isolate);
 
@@ -1560,7 +1568,18 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void AddDetachedContext(Handle<Context> context);
   void CheckDetachedContextsAfterGC();
 
+  // Detach the environment from its outer global object.
+  void DetachGlobal(Handle<Context> env);
+
   std::vector<Object>* startup_object_cache() { return &startup_object_cache_; }
+
+  // When there is a shared space (i.e. when this is a client Isolate), the
+  // shared heap object cache holds objects in shared among Isolates. Otherwise
+  // this object cache is per-Isolate like the startup object cache.
+  std::vector<Object>* shared_heap_object_cache() {
+    if (shared_isolate()) return shared_isolate()->shared_heap_object_cache();
+    return &shared_heap_object_cache_;
+  }
 
   bool IsGeneratingEmbeddedBuiltins() const {
     return builtins_constants_table_builder() != nullptr;
@@ -1592,6 +1611,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool is_short_builtin_calls_enabled() const {
     return V8_SHORT_BUILTIN_CALLS_BOOL && is_short_builtin_calls_enabled_;
   }
+
+  static base::AddressRegion GetShortBuiltinsCallRegion();
 
   void set_array_buffer_allocator(v8::ArrayBuffer::Allocator* allocator) {
     array_buffer_allocator_ = allocator;
@@ -1819,13 +1840,16 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   base::Mutex* client_isolate_mutex() { return &client_isolate_mutex_; }
 
+  bool OwnsStringTable() { return !FLAG_shared_string_table || is_shared(); }
+
  private:
   explicit Isolate(std::unique_ptr<IsolateAllocator> isolate_allocator,
                    bool is_shared);
   ~Isolate();
 
   bool Init(SnapshotData* startup_snapshot_data,
-            SnapshotData* read_only_snapshot_data, bool can_rehash);
+            SnapshotData* read_only_snapshot_data,
+            SnapshotData* shared_heap_snapshot_data, bool can_rehash);
 
   void CheckIsolateLayout();
 
@@ -1947,11 +1971,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // handlers and optimized code).
   IsolateData isolate_data_;
 
+  // Set to true if this isolate is used as shared heap. This field must be set
+  // before Heap is constructed, as Heap's constructor consults it.
+  const bool is_shared_;
+
   std::unique_ptr<IsolateAllocator> isolate_allocator_;
   Heap heap_;
   ReadOnlyHeap* read_only_heap_ = nullptr;
   std::shared_ptr<ReadOnlyArtifacts> artifacts_;
-  std::unique_ptr<StringTable> string_table_;
+  std::shared_ptr<StringTable> string_table_;
 
   const int id_;
   EntryStackItem* entry_stack_ = nullptr;
@@ -2033,14 +2061,18 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 #ifdef V8_INTL_SUPPORT
   std::string default_locale_;
 
-  struct ICUObjectCacheTypeHash {
-    std::size_t operator()(ICUObjectCacheType a) const {
-      return static_cast<std::size_t>(a);
-    }
+  // The cache stores the most recently accessed {locales,obj} pair for each
+  // cache type.
+  struct ICUObjectCacheEntry {
+    std::string locales;
+    std::shared_ptr<icu::UMemory> obj;
+
+    ICUObjectCacheEntry() = default;
+    ICUObjectCacheEntry(std::string locales, std::shared_ptr<icu::UMemory> obj)
+        : locales(locales), obj(std::move(obj)) {}
   };
-  typedef std::pair<std::string, std::shared_ptr<icu::UMemory>> ICUCachePair;
-  std::unordered_map<ICUObjectCacheType, ICUCachePair, ICUObjectCacheTypeHash>
-      icu_object_cache_;
+
+  ICUObjectCacheEntry icu_object_cache_[kICUObjectCacheTypeCount];
 #endif  // V8_INTL_SUPPORT
 
   // true if being profiled. Causes collection of extra compile info.
@@ -2155,6 +2187,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   std::vector<Object> startup_object_cache_;
 
+  // When sharing data among Isolates (e.g. FLAG_shared_string_table), only the
+  // shared Isolate populates this and client Isolates reference that copy.
+  //
+  // Otherwise this is populated for all Isolates.
+  std::vector<Object> shared_heap_object_cache_;
+
   // Used during builtins compilation to build the builtins constants table,
   // which is stored on the root list prior to serialization.
   BuiltinsConstantsTableBuilder* builtins_constants_table_builder_ = nullptr;
@@ -2214,9 +2252,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // know if this is the case, so I'm preserving it for now.
   base::Mutex thread_data_table_mutex_;
   ThreadDataTable thread_data_table_;
-
-  // Set to true if this isolate is used as shared heap.
-  const bool is_shared_;
 
   // Stores the shared isolate for this client isolate. nullptr for shared
   // isolates or when no shared isolate is used.

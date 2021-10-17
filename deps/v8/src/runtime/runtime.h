@@ -333,6 +333,7 @@ namespace internal {
   F(OptimizeObjectForAddingMultipleProperties, 2, 1)            \
   F(SetDataProperties, 2, 1)                                    \
   F(SetKeyedProperty, 3, 1)                                     \
+  F(DefineClassField, 3, 1)                                     \
   F(SetNamedProperty, 3, 1)                                     \
   F(SetOwnPropertyIgnoreAttributes, 4, 1)                       \
   F(StoreDataPropertyInLiteral, 3, 1)                           \
@@ -463,7 +464,7 @@ namespace internal {
 
 #define FOR_EACH_INTRINSIC_TEST(F, I)         \
   F(Abort, 1, 1)                              \
-  F(AbortCSAAssert, 1, 1)                     \
+  F(AbortCSADcheck, 1, 1)                     \
   F(AbortJS, 1, 1)                            \
   F(ArrayIteratorProtector, 0, 1)             \
   F(ArraySpeciesProtector, 0, 1)              \
@@ -634,6 +635,7 @@ namespace internal {
   F(ElementsTransitionAndStoreIC_Miss, 6, 1) \
   F(KeyedLoadIC_Miss, 4, 1)                  \
   F(KeyedStoreIC_Miss, 5, 1)                 \
+  F(KeyedDefineOwnIC_Miss, 5, 1)             \
   F(StoreInArrayLiteralIC_Miss, 5, 1)        \
   F(KeyedStoreIC_Slow, 3, 1)                 \
   F(LoadElementWithInterceptor, 2, 1)        \
@@ -649,6 +651,7 @@ namespace internal {
   F(StoreGlobalICNoFeedback_Miss, 2, 1)      \
   F(StoreGlobalIC_Slow, 5, 1)                \
   F(StoreIC_Miss, 5, 1)                      \
+  F(StoreOwnIC_Miss, 5, 1)                   \
   F(StoreInArrayLiteralIC_Slow, 5, 1)        \
   F(StorePropertyWithInterceptor, 5, 1)      \
   F(CloneObjectIC_Miss, 4, 1)                \
@@ -793,6 +796,11 @@ class Runtime : public AllStatic {
   SetObjectProperty(Isolate* isolate, Handle<Object> object, Handle<Object> key,
                     Handle<Object> value, StoreOrigin store_origin,
                     Maybe<ShouldThrow> should_throw = Nothing<ShouldThrow>());
+
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  DefineClassField(Isolate* isolate, Handle<Object> object, Handle<Object> key,
+                   Handle<Object> value, StoreOrigin store_origin,
+                   Maybe<ShouldThrow> should_throw = Nothing<ShouldThrow>());
 
   // When "receiver" is not passed, it defaults to "lookup_start_object".
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>

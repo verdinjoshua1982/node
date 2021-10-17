@@ -809,13 +809,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchTableSwitch:
       AssembleArchTableSwitch(instr);
       break;
-    case kArchAbortCSAAssert:
+    case kArchAbortCSADcheck:
       DCHECK(i.InputRegister(0) == a0);
       {
         // We don't actually want to generate a pile of code for this, so just
         // claim there is a stack frame, without generating one.
-        FrameScope scope(tasm(), StackFrame::NONE);
-        __ Call(isolate()->builtins()->code_handle(Builtin::kAbortCSAAssert),
+        FrameScope scope(tasm(), StackFrame::NO_FRAME_TYPE);
+        __ Call(isolate()->builtins()->code_handle(Builtin::kAbortCSADcheck),
                 RelocInfo::CODE_TARGET);
       }
       __ stop();
@@ -4142,14 +4142,15 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
   if (drop_jsargs) {
     // We must pop all arguments from the stack (including the receiver). This
     // number of arguments is given by max(1 + argc_reg, parameter_slots).
-    __ Addu(t0, t0, Operand(1));  // Also pop the receiver.
+    if (!kJSArgcIncludesReceiver) {
+      __ Addu(t0, t0, Operand(1));  // Also pop the receiver.
+    }
     if (parameter_slots > 1) {
       __ li(kScratchReg, parameter_slots);
       __ slt(kScratchReg2, t0, kScratchReg);
       __ movn(t0, kScratchReg, kScratchReg2);
     }
-    __ sll(t0, t0, kSystemPointerSizeLog2);
-    __ Addu(sp, sp, t0);
+    __ Lsa(sp, sp, t0, kSystemPointerSizeLog2, t0);
   } else if (additional_pop_count->IsImmediate()) {
     DCHECK_EQ(Constant::kInt32, g.ToConstant(additional_pop_count).type());
     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
@@ -4157,8 +4158,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
   } else {
     Register pop_reg = g.ToRegister(additional_pop_count);
     __ Drop(parameter_slots);
-    __ sll(pop_reg, pop_reg, kSystemPointerSizeLog2);
-    __ Addu(sp, sp, pop_reg);
+    __ Lsa(sp, sp, pop_reg, kSystemPointerSizeLog2, pop_reg);
   }
   __ Ret();
 }

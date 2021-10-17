@@ -12,6 +12,7 @@
 #include "src/debug/debug-interface.h"
 #include "src/logging/counters.h"
 #include "src/objects/debug-objects-inl.h"
+#include "src/objects/managed-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/shared-function-info.h"
 #include "src/objects/struct-inl.h"
@@ -251,7 +252,7 @@ base::Vector<const uint8_t> WasmModuleObject::GetRawFunctionName(
 Handle<WasmTableObject> WasmTableObject::New(
     Isolate* isolate, Handle<WasmInstanceObject> instance, wasm::ValueType type,
     uint32_t initial, bool has_maximum, uint32_t maximum,
-    Handle<FixedArray>* entries) {
+    Handle<FixedArray>* entries, Handle<Object> initial_value) {
   // TODO(7748): Make this work with other types when spec clears up.
   {
     const WasmModule* module =
@@ -260,9 +261,8 @@ Handle<WasmTableObject> WasmTableObject::New(
   }
 
   Handle<FixedArray> backing_store = isolate->factory()->NewFixedArray(initial);
-  Object null = ReadOnlyRoots(isolate).null_value();
   for (int i = 0; i < static_cast<int>(initial); ++i) {
-    backing_store->set(i, null);
+    backing_store->set(i, *initial_value);
   }
 
   Handle<Object> max;
@@ -1311,6 +1311,7 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
   instance->set_hook_on_function_call_address(
       isolate->debug()->hook_on_function_call_address());
   instance->set_managed_object_maps(*isolate->factory()->empty_fixed_array());
+  instance->set_feedback_vectors(*isolate->factory()->empty_fixed_array());
   instance->set_num_liftoff_function_calls_array(
       module_object->native_module()->num_liftoff_function_calls_array());
   instance->set_break_on_entry(module_object->script().break_on_entry());
@@ -1688,18 +1689,6 @@ wasm::WasmValue WasmArray::GetElement(uint32_t index) {
   }
 }
 
-ObjectSlot WasmArray::ElementSlot(uint32_t index) {
-  DCHECK_LE(index, length());
-  DCHECK(type()->element_type().is_reference());
-  return RawField(kHeaderSize + kTaggedSize * index);
-}
-
-Address WasmArray::ElementAddress(uint32_t index) {
-  DCHECK_LE(index, length());
-  return ptr() + WasmArray::kHeaderSize +
-         index * type()->element_type().element_size_bytes() - kHeapObjectTag;
-}
-
 // static
 Handle<WasmTagObject> WasmTagObject::New(Isolate* isolate,
                                          const wasm::FunctionSig* sig,
@@ -1841,6 +1830,40 @@ void DecodeI64ExceptionValue(Handle<FixedArray> encoded_values,
   DecodeI32ExceptionValue(encoded_values, encoded_index, &msb);
   DecodeI32ExceptionValue(encoded_values, encoded_index, &lsb);
   *value = (static_cast<uint64_t>(msb) << 32) | static_cast<uint64_t>(lsb);
+}
+
+// static
+Handle<WasmContinuationObject> WasmContinuationObject::New(
+    Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack,
+    HeapObject parent) {
+  Handle<WasmContinuationObject> result = Handle<WasmContinuationObject>::cast(
+      isolate->factory()->NewStruct(WASM_CONTINUATION_OBJECT_TYPE));
+  auto jmpbuf = std::make_unique<wasm::JumpBuffer>();
+  jmpbuf->stack_limit = stack->limit();
+  jmpbuf->fp = stack->base();
+  jmpbuf->sp = stack->base();
+  Handle<Foreign> managed_stack = Managed<wasm::StackMemory>::FromUniquePtr(
+      isolate, stack->owned_size(), std::move(stack));
+  Handle<Foreign> managed_jmpbuf = Managed<wasm::JumpBuffer>::FromUniquePtr(
+      isolate, sizeof(wasm::JumpBuffer), std::move(jmpbuf));
+  result->set_stack(*managed_stack);
+  result->set_jmpbuf(*managed_jmpbuf);
+  result->set_parent(parent);
+  return result;
+}
+
+// static
+Handle<WasmContinuationObject> WasmContinuationObject::New(
+    Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack) {
+  auto parent = ReadOnlyRoots(isolate).undefined_value();
+  return New(isolate, std::move(stack), parent);
+}
+
+// static
+Handle<WasmContinuationObject> WasmContinuationObject::New(
+    Isolate* isolate, WasmContinuationObject parent) {
+  auto stack = std::unique_ptr<wasm::StackMemory>(wasm::StackMemory::New());
+  return New(isolate, std::move(stack), parent);
 }
 
 #ifdef DEBUG

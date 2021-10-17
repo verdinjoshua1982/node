@@ -114,7 +114,8 @@ void IC::TraceIC(const char* type, Handle<Object> name, State old_state,
   } else if (IsKeyedLoadIC()) {
     KeyedAccessLoadMode mode = nexus()->GetKeyedAccessLoadMode();
     modifier = GetModifier(mode);
-  } else if (IsKeyedStoreIC() || IsStoreInArrayLiteralICKind(kind())) {
+  } else if (IsKeyedStoreIC() || IsStoreInArrayLiteralICKind(kind()) ||
+             IsDefineOwnIC()) {
     KeyedAccessStoreMode mode = nexus()->GetKeyedAccessStoreMode();
     modifier = GetModifier(mode);
   }
@@ -142,13 +143,19 @@ void IC::TraceIC(const char* type, Handle<Object> name, State old_state,
   ic_info.type += type;
 
   int code_offset = 0;
+  AbstractCode code = function.abstract_code(isolate_);
   if (function.ActiveTierIsIgnition()) {
     code_offset = InterpretedFrame::GetBytecodeOffset(frame->fp());
+  } else if (function.ActiveTierIsBaseline()) {
+    // TODO(pthier): AbstractCode should fully support Baseline code.
+    BaselineFrame* baseline_frame = BaselineFrame::cast(frame);
+    code_offset = baseline_frame->GetBytecodeOffset();
+    code = AbstractCode::cast(baseline_frame->GetBytecodeArray());
   } else {
     code_offset = static_cast<int>(frame->pc() - function.code_entry_point());
   }
-  JavaScriptFrame::CollectFunctionAndOffsetForICStats(
-      function, function.abstract_code(isolate_), code_offset);
+  JavaScriptFrame::CollectFunctionAndOffsetForICStats(function, code,
+                                                      code_offset);
 
   // Reserve enough space for IC transition state, the longest length is 17.
   ic_info.state.reserve(17);
@@ -973,11 +980,11 @@ Handle<Object> LoadIC::ComputeHandler(LookupIterator* lookup) {
       // Use simple field loads for some well-known callback properties.
       // The method will only return true for absolute truths based on the
       // lookup start object maps.
-      FieldIndex index;
+      FieldIndex field_index;
       if (Accessors::IsJSObjectFieldAccessor(isolate(), map, lookup->name(),
-                                             &index)) {
+                                             &field_index)) {
         TRACE_HANDLER_STATS(isolate(), LoadIC_LoadFieldDH);
-        return LoadHandler::LoadField(isolate(), index);
+        return LoadHandler::LoadField(isolate(), field_index);
       }
       if (holder->IsJSModuleNamespace()) {
         Handle<ObjectHashTable> exports(
@@ -988,8 +995,8 @@ Handle<Object> LoadIC::ComputeHandler(LookupIterator* lookup) {
                                Smi::ToInt(lookup->name()->GetHash()));
         // We found the accessor, so the entry must exist.
         DCHECK(entry.is_found());
-        int index = ObjectHashTable::EntryToValueIndex(entry);
-        return LoadHandler::LoadModuleExport(isolate(), index);
+        int value_index = ObjectHashTable::EntryToValueIndex(entry);
+        return LoadHandler::LoadModuleExport(isolate(), value_index);
       }
 
       Handle<Object> accessors = lookup->GetAccessors();
@@ -1128,7 +1135,8 @@ Handle<Object> LoadIC::ComputeHandler(LookupIterator* lookup) {
         TRACE_HANDLER_STATS(isolate(), LoadIC_SlowStub);
         return LoadHandler::LoadSlow(isolate());
       } else {
-        DCHECK_EQ(kField, lookup->property_details().location());
+        DCHECK_EQ(PropertyLocation::kField,
+                  lookup->property_details().location());
 #if V8_ENABLE_WEBASSEMBLY
         if (V8_UNLIKELY(holder->IsWasmObject(isolate()))) {
           smi_handler =
@@ -1716,7 +1724,10 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
   // might deprecate the current map again, if value does not fit.
   if (MigrateDeprecated(isolate(), object)) {
     PropertyKey key(isolate(), name);
-    LookupIterator it(isolate(), object, key);
+    LookupIterator it(
+        isolate(), object, key,
+        IsAnyStoreOwn() ? LookupIterator::OWN : LookupIterator::DEFAULT);
+    DCHECK_IMPLIES(IsStoreOwnIC(), it.IsFound() && it.HolderIsReceiver());
     MAYBE_RETURN_NULL(Object::SetProperty(&it, value, StoreOrigin::kNamed));
     return value;
   }
@@ -1738,14 +1749,22 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
 
   JSObject::MakePrototypesFast(object, kStartAtPrototype, isolate());
   PropertyKey key(isolate(), name);
-  LookupIterator it(isolate(), object, key);
+  LookupIterator it(
+      isolate(), object, key,
+      IsAnyStoreOwn() ? LookupIterator::OWN : LookupIterator::DEFAULT);
 
   if (name->IsPrivate()) {
-    if (name->IsPrivateName() && !it.IsFound()) {
+    bool exists = it.IsFound();
+    if (name->IsPrivateName() && exists == IsDefineOwnIC()) {
       Handle<String> name_string(
           String::cast(Symbol::cast(*name).description()), isolate());
-      return TypeError(MessageTemplate::kInvalidPrivateMemberWrite, object,
-                       name_string);
+      if (exists) {
+        return TypeError(MessageTemplate::kInvalidPrivateFieldReitialization,
+                         object, name_string);
+      } else {
+        return TypeError(MessageTemplate::kInvalidPrivateMemberWrite, object,
+                         name_string);
+      }
     }
 
     // IC handling of private fields/symbols stores on JSProxy is not
@@ -1987,7 +2006,7 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
       }
 
       // -------------- Fields --------------
-      if (lookup->property_details().location() == kField) {
+      if (lookup->property_details().location() == PropertyLocation::kField) {
         TRACE_HANDLER_STATS(isolate(), StoreIC_StoreFieldDH);
         int descriptor = lookup->GetFieldDescriptorIndex();
         FieldIndex index = lookup->GetFieldIndex();
@@ -2004,7 +2023,8 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
       }
 
       // -------------- Constant properties --------------
-      DCHECK_EQ(kDescriptor, lookup->property_details().location());
+      DCHECK_EQ(PropertyLocation::kDescriptor,
+                lookup->property_details().location());
       set_slow_stub_reason("constant property");
       TRACE_HANDLER_STATS(isolate(), StoreIC_SlowStub);
       return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
@@ -2324,8 +2344,11 @@ MaybeHandle<Object> KeyedStoreIC::Store(Handle<Object> object,
     Handle<Object> result;
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate(), result,
-        Runtime::SetObjectProperty(isolate(), object, key, value,
-                                   StoreOrigin::kMaybeKeyed),
+        IsDefineOwnIC()
+            ? Runtime::DefineClassField(isolate(), object, key, value,
+                                        StoreOrigin::kMaybeKeyed)
+            : Runtime::SetObjectProperty(isolate(), object, key, value,
+                                         StoreOrigin::kMaybeKeyed),
         Object);
     return result;
   }
@@ -2676,6 +2699,34 @@ RUNTIME_FUNCTION(Runtime_StoreIC_Miss) {
   RETURN_RESULT_OR_FAILURE(isolate, ic.Store(receiver, key, value));
 }
 
+RUNTIME_FUNCTION(Runtime_StoreOwnIC_Miss) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(5, args.length());
+  // Runtime functions don't follow the IC's calling convention.
+  Handle<Object> value = args.at(0);
+  Handle<TaggedIndex> slot = args.at<TaggedIndex>(1);
+  Handle<HeapObject> maybe_vector = args.at<HeapObject>(2);
+  Handle<Object> receiver = args.at(3);
+  Handle<Name> key = args.at<Name>(4);
+
+  FeedbackSlot vector_slot = FeedbackVector::ToSlot(slot->value());
+
+  // When there is no feedback vector it is OK to use the StoreOwnNamed
+  // feedback kind. There _should_ be a vector, though.
+  FeedbackSlotKind kind = FeedbackSlotKind::kStoreOwnNamed;
+  Handle<FeedbackVector> vector = Handle<FeedbackVector>();
+  if (!maybe_vector->IsUndefined()) {
+    DCHECK(maybe_vector->IsFeedbackVector());
+    vector = Handle<FeedbackVector>::cast(maybe_vector);
+    kind = vector->GetKind(vector_slot);
+  }
+
+  DCHECK(IsStoreOwnICKind(kind));
+  StoreIC ic(isolate, vector, vector_slot, kind);
+  ic.UpdateState(receiver, key);
+  RETURN_RESULT_OR_FAILURE(isolate, ic.Store(receiver, key, value));
+}
+
 RUNTIME_FUNCTION(Runtime_StoreGlobalIC_Miss) {
   HandleScope scope(isolate);
   DCHECK_EQ(4, args.length());
@@ -2787,7 +2838,7 @@ RUNTIME_FUNCTION(Runtime_KeyedStoreIC_Miss) {
 
   // The elements store stubs miss into this function, but they are shared by
   // different ICs.
-  if (IsKeyedStoreICKind(kind)) {
+  if (IsKeyedStoreICKind(kind) || IsKeyedDefineOwnICKind(kind)) {
     KeyedStoreIC ic(isolate, vector, vector_slot, kind);
     ic.UpdateState(receiver, key);
     RETURN_RESULT_OR_FAILURE(isolate, ic.Store(receiver, key, value));
@@ -2800,6 +2851,33 @@ RUNTIME_FUNCTION(Runtime_KeyedStoreIC_Miss) {
     RETURN_RESULT_OR_FAILURE(
         isolate, ic.Store(Handle<JSArray>::cast(receiver), key, value));
   }
+}
+
+RUNTIME_FUNCTION(Runtime_KeyedDefineOwnIC_Miss) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(5, args.length());
+  // Runtime functions don't follow the IC's calling convention.
+  Handle<Object> value = args.at(0);
+  Handle<TaggedIndex> slot = args.at<TaggedIndex>(1);
+  Handle<HeapObject> maybe_vector = args.at<HeapObject>(2);
+  Handle<Object> receiver = args.at(3);
+  Handle<Object> key = args.at(4);
+  FeedbackSlot vector_slot = FeedbackVector::ToSlot(slot->value());
+
+  FeedbackSlotKind kind = FeedbackSlotKind::kDefineOwnKeyed;
+  Handle<FeedbackVector> vector = Handle<FeedbackVector>();
+  if (!maybe_vector->IsUndefined()) {
+    DCHECK(maybe_vector->IsFeedbackVector());
+    vector = Handle<FeedbackVector>::cast(maybe_vector);
+    kind = vector->GetKind(vector_slot);
+    DCHECK(IsDefineOwnICKind(kind));
+  }
+
+  // The elements store stubs miss into this function, but they are shared by
+  // different ICs.
+  KeyedStoreIC ic(isolate, vector, vector_slot, kind);
+  ic.UpdateState(receiver, key);
+  RETURN_RESULT_OR_FAILURE(isolate, ic.Store(receiver, key, value));
 }
 
 RUNTIME_FUNCTION(Runtime_StoreInArrayLiteralIC_Miss) {
